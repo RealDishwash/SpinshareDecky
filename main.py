@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
+import ssl
 import tempfile
 import threading
 import time
@@ -18,6 +19,28 @@ SUFFIX = Path('steamapps/compatdata/1058830/pfx/drive_c/users/steamuser/AppData/
 MAX_ZIP = 256 * 1024 * 1024
 MAX_FILES = 512
 MAX_UNPACKED = 512 * 1024 * 1024
+
+
+# Decky's bundled Python may have build-time OpenSSL paths that do not exist
+# on SteamOS. Add the host trust bundle without disabling TLS verification.
+SYSTEM_CA_BUNDLES = (
+    '/etc/ssl/certs/ca-certificates.crt',
+    '/etc/ca-certificates/extracted/tls-ca-bundle.pem',
+    '/etc/pki/tls/certs/ca-bundle.crt',
+    '/etc/ssl/cert.pem',
+)
+
+
+def tls_context():
+    context = ssl.create_default_context()
+    for name in SYSTEM_CA_BUNDLES:
+        bundle = Path(name)
+        if bundle.is_file():
+            context.load_verify_locations(cafile=str(bundle))
+            break
+    if not context.get_ca_certs():
+        raise RuntimeError('No trusted system certificates found. Update SteamOS and restart Decky.')
+    return context
 
 
 def atomic_json(path, value):
@@ -217,8 +240,8 @@ class Plugin:
         if key in self.cache and time.monotonic() - self.cache[key][0] < 60:
             return self.cache[key][1]
         request = urllib.request.Request(API + endpoint, data=json.dumps(body).encode() if body is not None else None,
-                                         headers={'User-Agent': 'SpinShareDecky/0.1.0', 'Content-Type': 'application/json'})
-        with urllib.request.urlopen(request, timeout=30) as response:
+                                         headers={'User-Agent': 'SpinShareDecky/0.1.1', 'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=30, context=tls_context()) as response:
             value = json.loads(response.read(8 * 1024 * 1024))
         if value.get('status') == 404:
             return []
@@ -280,8 +303,8 @@ class Plugin:
             if song.get('dlc'):
                 raise ValueError('This chart requires DLC verification. Install it with the official SpinShare client.')
             with tempfile.TemporaryFile() as archive:
-                request = urllib.request.Request(API + f'song/{song_id}/download', headers={'User-Agent': 'SpinShareDecky/0.1.0'})
-                with urllib.request.urlopen(request, timeout=60) as response:
+                request = urllib.request.Request(API + f'song/{song_id}/download', headers={'User-Agent': 'SpinShareDecky/0.1.1'})
+                with urllib.request.urlopen(request, timeout=60, context=tls_context()) as response:
                     received = 0
                     while chunk := response.read(256 * 1024):
                         received += len(chunk)

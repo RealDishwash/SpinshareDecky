@@ -22,7 +22,7 @@ npm test
 npm run package
 ```
 
-The installable package is `release/spinshare-decky-0.1.0.zip`.
+The installable package is `release/spinshare-decky-0.1.1.zip`.
 
 ## Install on your Deck
 
@@ -65,3 +65,7 @@ The frontend is type-checked and bundled against current Decky packages. Actual 
 3. Download one chart and verify chart, audio, and artwork inside the game.
 4. Delete it and check the game's refreshed custom list.
 5. Check an SD-card installation, network failure/retry, and returning to an active download.
+
+## HTTPS certificates
+
+The plugin loads the SteamOS system CA bundle explicitly because Decky’s bundled Python can have certificate paths from its build environment. HTTPS certificate and hostname verification remain enabled for both catalogue requests and downloads.

@@ -1,6 +1,10 @@
 """SpinShare Decky backend. Standard library only; runs as the Deck user."""
 import asyncio
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import hashlib
+import gzip
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -41,6 +45,97 @@ def tls_context():
     if not context.get_ca_certs():
         raise RuntimeError('No trusted system certificates found. Update SteamOS and restart Decky.')
     return context
+
+
+DIFFICULTIES = {
+    'easy': ('hasEasyDifficulty', 'easyDifficulty'),
+    'normal': ('hasNormalDifficulty', 'normalDifficulty'),
+    'hard': ('hasHardDifficulty', 'hardDifficulty'),
+    'extreme': ('hasExtremeDifficulty', 'expertDifficulty'),
+    'xd': ('hasXDDifficulty', 'XDDifficulty'),
+}
+BROWSE_MODES = ('new', 'updated', 'hotThisWeek', 'hotThisMonth', 'topYear', 'topAllTime', 'search')
+SORT_ORDERS = ('recommended', 'difficultyAsc', 'difficultyDesc', 'title', 'downloads')
+PAGE_SIZE = 12
+
+
+def filter_options(options=None):
+    options = options or {}
+    difficulty = options.get('difficulty', 'all')
+    order = options.get('sort', 'recommended')
+    low, high = int(options.get('minimum', 0)), int(options.get('maximum', 99))
+    if difficulty not in ('all', *DIFFICULTIES) or order not in SORT_ORDERS:
+        raise ValueError('Invalid difficulty or sort order')
+    if not 0 <= low <= high <= 99:
+        raise ValueError('Difficulty range must be between 0 and 99, with minimum no higher than maximum')
+    return {'difficulty': difficulty, 'minimum': low, 'maximum': high, 'sort': order}
+
+
+def matching_ratings(song, options):
+    tiers = DIFFICULTIES.values() if options['difficulty'] == 'all' else [DIFFICULTIES[options['difficulty']]]
+    return [song[value] for flag, value in tiers
+            if song.get(flag) and isinstance(song.get(value), (int, float))
+            and not isinstance(song.get(value), bool)
+            and options['minimum'] <= song[value] <= options['maximum']]
+
+
+def song_date(song, field):
+    value = song.get(field)
+    if isinstance(value, dict):
+        zone = value.get('timezone', 'Europe/Berlin')
+        value = value.get('date')
+    else:
+        zone = 'Europe/Berlin'
+    try:
+        parsed = datetime.fromisoformat(value)
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo(zone))).astimezone(timezone.utc)
+    except (TypeError, ValueError, KeyError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def select_songs(songs, mode, options, now=None):
+    """Filter and sort the complete search result BEFORE pagination."""
+    now = now or datetime.now(timezone.utc)
+    earliest = datetime.min.replace(tzinfo=timezone.utc)
+    if mode == 'hotThisWeek':
+        earliest = now - timedelta(days=7)
+    elif mode == 'hotThisMonth':
+        # Calendar-month window, matching SpinShare's one-month popularity list.
+        previous = now.replace(day=1) - timedelta(days=1)
+        earliest = now.replace(year=previous.year, month=previous.month, day=min(now.day, previous.day))
+    elif mode == 'topYear':
+        earliest = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    result = []
+    unrestricted = options['difficulty'] == 'all' and options['minimum'] == 0 and options['maximum'] == 99
+    for song in songs:
+        # Direct chart-link searches can bypass the server's filters.
+        ratings = matching_ratings(song, options)
+        if not ratings and not unrestricted:
+            continue
+        uploaded = song_date(song, 'uploadDate')
+        if mode in ('hotThisWeek', 'hotThisMonth', 'topYear') and not earliest <= uploaded <= now:
+            continue
+        if mode == 'updated' and song_date(song, 'updateDate') <= uploaded:
+            continue
+        result.append(song)
+    order = options['sort']
+    def identity(song):
+        return str(song.get('title', '')).casefold(), int(song.get('id', 0))
+    if order in ('difficultyAsc', 'difficultyDesc'):
+        def difficulty_key(song):
+            ratings = matching_ratings(song, options)
+            if not ratings:
+                return (True, 0, identity(song))
+            value = min(ratings) if order == 'difficultyAsc' else -max(ratings)
+            return (False, value, identity(song))
+        result.sort(key=difficulty_key)
+    elif order == 'title':
+        result.sort(key=identity)
+    elif order == 'downloads' or (order == 'recommended' and mode in ('hotThisWeek', 'hotThisMonth', 'topYear', 'topAllTime')):
+        result.sort(key=lambda song: (-(song.get('downloads') or 0), -(song.get('views') or 0), identity(song)))
+    else:
+        result.sort(key=lambda song: (song_date(song, 'updateDate' if mode == 'updated' else 'uploadDate'), int(song.get('id', 0))), reverse=True)
+    return result
 
 
 def atomic_json(path, value):
@@ -237,30 +332,57 @@ class Plugin:
 
     def api(self, endpoint, body=None):
         key = endpoint + json.dumps(body)
-        if key in self.cache and time.monotonic() - self.cache[key][0] < 60:
+        if key in self.cache and time.monotonic() - self.cache[key][0] < (300 if endpoint == 'searchCharts' else 60):
             return self.cache[key][1]
         request = urllib.request.Request(API + endpoint, data=json.dumps(body).encode() if body is not None else None,
-                                         headers={'User-Agent': 'SpinShareDecky/0.1.1', 'Content-Type': 'application/json'})
+                                         headers={'User-Agent': 'SpinShareDecky/0.2.0', 'Content-Type': 'application/json', 'Accept-Encoding': 'gzip'})
         with urllib.request.urlopen(request, timeout=30, context=tls_context()) as response:
-            value = json.loads(response.read(8 * 1024 * 1024))
+            raw = response.read(32 * 1024 * 1024 + 1)
+            if len(raw) > 32 * 1024 * 1024:
+                raise ValueError('Search response is too large. Narrow your search.')
+            if response.headers.get('Content-Encoding', '').lower() == 'gzip':
+                with gzip.GzipFile(fileobj=io.BytesIO(raw)) as compressed:
+                    raw = compressed.read(32 * 1024 * 1024 + 1)
+                if len(raw) > 32 * 1024 * 1024:
+                    raise ValueError('Search response is too large. Narrow your search.')
+            value = json.loads(raw)
         if value.get('status') == 404:
             return []
         if value.get('status') != 200:
             raise ValueError('SpinShare could not complete the request')
-        if len(self.cache) > 100:
-            self.cache.clear()
+        if len(self.cache) >= 4:
+            self.cache.pop(next(iter(self.cache)))
         self.cache[key] = (time.monotonic(), value['data'])
         return value['data']
 
-    async def browse(self, mode='new', query='', offset=0):
-        if mode not in ('new', 'updated', 'hotThisWeek', 'hotThisMonth', 'search'):
+    async def browse(self, mode='new', query='', offset=0, options=None):
+        if mode not in BROWSE_MODES:
             raise ValueError('Invalid browse mode')
+        options = filter_options(options)
         offset = max(0, min(int(offset), 100000))
-        if mode == 'search':
-            data = await asyncio.to_thread(self.api, 'searchCharts', {'searchQuery': str(query)[:200], 'showExplicit': True})
-            return {'songs': data[offset:offset + 12], 'hasMore': len(data) > offset + 12}
-        data = await asyncio.to_thread(self.api, f'songs/{mode}/{offset}')
-        return {'songs': data, 'hasMore': len(data) == 12}
+        query = str(query).strip()[:200]
+        filtered = options != filter_options() or bool(query)
+        if not filtered and mode in ('new', 'updated', 'hotThisWeek', 'hotThisMonth'):
+            # SpinShare calls this parameter offset, but its repository multiplies
+            # it by 12: the wire value is a PAGE index, not a record offset.
+            data = await asyncio.to_thread(self.api, f'songs/{mode}/{offset // PAGE_SIZE}')
+            return {'songs': data, 'hasMore': len(data) == PAGE_SIZE, 'total': None}
+        # Prefer a cached broad query, otherwise let SpinShare narrow the payload.
+        # Sorting is always applied to the complete result before pagination.
+        body = {'searchQuery': query, 'showExplicit': True, 'diffEasy': True, 'diffNormal': True,
+                'diffHard': True, 'diffExpert': True, 'diffXD': True, 'diffRatingFrom': 0, 'diffRatingTo': 99}
+        broad = self.cache.get('searchCharts' + json.dumps(body))
+        if broad and time.monotonic() - broad[0] < 300:
+            data = broad[1]
+        else:
+            for tier, parameter in [('easy', 'diffEasy'), ('normal', 'diffNormal'), ('hard', 'diffHard'),
+                                    ('extreme', 'diffExpert'), ('xd', 'diffXD')]:
+                body[parameter] = options['difficulty'] in ('all', tier)
+            body['diffRatingFrom'] = options['minimum']
+            body['diffRatingTo'] = options['maximum']
+            data = await asyncio.to_thread(self.api, 'searchCharts', body)
+        selected = await asyncio.to_thread(select_songs, data, mode, options)
+        return {'songs': selected[offset:offset + PAGE_SIZE], 'hasMore': len(selected) > offset + PAGE_SIZE, 'total': len(selected)}
 
     async def detail(self, song_id):
         return await asyncio.to_thread(self.api, f'song/{int(song_id)}')
@@ -303,7 +425,7 @@ class Plugin:
             if song.get('dlc'):
                 raise ValueError('This chart requires DLC verification. Install it with the official SpinShare client.')
             with tempfile.TemporaryFile() as archive:
-                request = urllib.request.Request(API + f'song/{song_id}/download', headers={'User-Agent': 'SpinShareDecky/0.1.1'})
+                request = urllib.request.Request(API + f'song/{song_id}/download', headers={'User-Agent': 'SpinShareDecky/0.2.0'})
                 with urllib.request.urlopen(request, timeout=60, context=tls_context()) as response:
                     received = 0
                     while chunk := response.read(256 * 1024):

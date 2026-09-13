@@ -4,7 +4,10 @@ Browse SpinShare and manage Spin Rhythm XD custom songs from a full-page view in
 
 ## Features
 
-- New releases, weekly/monthly popular songs, recently updated charts, and search.
+- Native Decky tabs, standard song rows, dropdowns, and controller-friendly filter dialogs.
+- New releases, weekly/monthly/yearly/all-time top songs, recently updated charts, and search.
+- Easy, Normal, Hard, Extreme, or XD filtering with minimum/maximum rating sliders (0–99).
+- Sort by collection order, easiest/hardest matching chart, download count, or title.
 - Cover art, artist/charter details, difficulty ratings, descriptions, and download counts.
 - Download progress that continues when you leave the page.
 - Installed library, missing-file indicators, and confirmed local deletion.
@@ -22,7 +25,7 @@ npm test
 npm run package
 ```
 
-The installable package is `release/spinshare-decky-0.1.1.zip`.
+The installable package is `release/spinshare-decky-0.2.0.zip`.
 
 ## Install on your Deck
 
@@ -40,6 +43,18 @@ SD-card installations can use a different Steam library root. If no folder is fo
 
 Charts go directly in `Custom`; their audio and cover assets go in `Custom/AudioClips` and `Custom/AlbumArt`. Reopen the game's Custom list after installation; restart the game if it hasn't refreshed.
 
+## Browsing and filters
+
+Use **Browse songs**, **Installed**, and **Settings** in the native Decky tab bar. The collection dropdown chooses newest, updated, or a top-song period. The sort dropdown orders the whole result set, not just the visible page.
+
+Open **Filters** to choose a difficulty and adjust minimum/maximum rating with native sliders. Select **Apply filters** to update results, or Cancel to leave them unchanged. Ranges are inclusive and the two sliders cannot cross. With all difficulties selected, any chart in the range qualifies; easiest/hardest sorting uses the lowest/highest matching chart on each song. Unknown ratings sort last and are excluded by restricted filters.
+
+**Top · This year** ranks charts uploaded this calendar year by total downloads. **Top · All time** ranks all upload dates. Weekly/monthly collections use the same upload-window meaning as SpinShare. These are not historical counts of downloads within the period. Search and difficulty filters combine with the chosen collection.
+
+The first broad filtered search may take longer because SpinShare returns the full result set. Sort changes reuse the response for five minutes. Difficulty/rating constraints reduce the server response; an already cached broad search also serves narrower filters. Unfiltered new/updated/weekly/monthly browsing uses smaller paginated feeds.
+
+See [UI references and filtering details](https://github.com/RealDishwash/SpinshareDecky/blob/main/docs/ui-patterns.md).
+
 ## File handling
 
 The hidden `.spinshare-decky.json` file in Custom records installed songs and file hashes. Keep this file to retain managed deletion. Conflicting existing files are never overwritten. Identical files can be shared; modified/pre-existing files are preserved on deletion. When unknown charts exist, assets are conservatively retained because those charts may reference them. A managed song must be deleted before downloading a newer version.
@@ -50,7 +65,7 @@ Only one download runs at a time. DLC charts requiring entitlement verification 
 
 ## Privacy and attribution
 
-Catalogue, artwork, and downloads are provided by [SpinShare](https://spinsha.re/). Search terms are sent to SpinShare's public API. The plugin stores its chosen folder and a local installation manifest. It does not request credentials or add analytics. Catalogue responses are cached for 60 seconds.
+Catalogue, artwork, and downloads are provided by [SpinShare](https://spinsha.re/). Search terms are sent to SpinShare's public API. The plugin stores its chosen folder and a local installation manifest. It does not request credentials or add analytics. Search results are cached for five minutes; other catalogue responses for one minute.
 
 References: [SpinShare API](https://spinsha.re/api/docs), [official game editor guide](https://www.spinrhythmgame.com/editor-guide), [Decky plugin template and packaging](https://github.com/SteamDeckHomebrew/decky-plugin-template).
 
@@ -60,11 +75,12 @@ Automated tests cover archive layout, traversal/symlink rejection, collision pro
 
 The frontend is type-checked and bundled against current Decky packages. Actual Steam Game Mode rendering and gamepad navigation require a Steam Deck and have not been verified here. Before everyday use, check:
 
-1. Open the full-page view and navigate tabs, search, cards, and Back using the controller.
-2. Confirm Settings points to the active game's prefix.
-3. Download one chart and verify chart, audio, and artwork inside the game.
-4. Delete it and check the game's refreshed custom list.
-5. Check an SD-card installation, network failure/retry, and returning to an active download.
+1. Open the full-page view and navigate tabs, search, song rows, and Back using the controller.
+2. Open Filters, adjust both sliders with the D-pad, test Cancel/Apply, and check both difficulty sort directions.
+3. Confirm Settings points to the active game's prefix.
+4. Download one chart and verify chart, audio, and artwork inside the game.
+5. Delete it and check the game's refreshed custom list.
+6. Check an SD-card installation, network failure/retry, and returning to an active download.
 
 ## HTTPS certificates
 
